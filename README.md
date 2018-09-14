@@ -1,0 +1,1 @@
+Attempting to implement faster-RCNN in Tensorflow from scratch to get a better understanding of how to use Tensorflow. Currently testing my ResNet model on Cifar10. Long way to go.
