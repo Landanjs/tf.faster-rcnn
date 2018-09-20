@@ -35,10 +35,11 @@ def get_batch(data_dir, batch_size, train):
     # random state to generate the train/val split
     rand = np.random.RandomState(123)
     
-    # calculate the size of the data
+    # calculate the size of the data and the mean of the images
     with h5py.File(os.path.join(data_dir, 'train_cifar10.hdf5'), 'r') as data:
         data_size = len(data['labels'])
-    
+        img_mean = np.mean(data['images'], axis=0)
+        
     indices = rand.permutation(data_size)
     train_size = int(data_size * (1 - args.val_split))
     if train:
@@ -50,40 +51,52 @@ def get_batch(data_dir, batch_size, train):
         set_size = int(data_size * args.val_split)
         
     num_batches = (set_size // batch_size) + 1
+    
     for start in range(0, set_size, batch_size):
         end = start + batch_size
         batch = indices[start:end]
         with h5py.File(os.path.join(data_dir, 'train_cifar10.hdf5'), 'r') as data:
-            images = []
-            labels = []
-            for ind in batch:
+            images = np.zeros((batch_size, 32, 32, 3))
+            labels = np.zeros((batch_size, args.num_classes))
+            for batch_ind, data_ind in enumerate(batch):
+                img = (data['images'][data_ind] - img_mean)
                 if np.random.random_sample() < 0.5:
-                    images.append(data['images'][ind])
-                else:
-                    images.append(np.fliplr(data['images'][ind]))
-                labels.append(data['labels'][ind])
-            images = np.stack(images)
-            labels = np.stack(labels).astype(int)
-        one_hot_labels = np.zeros((len(labels), args.num_classes))
-        one_hot_labels[np.arange(len(labels)), labels[:]] = 1
-        yield (images, one_hot_labels)
+                    img = np.fliplr(img)
+                img_pad = np.pad(img, ((4, 4), (4, 4), (0, 0)), 'constant', constant_values=0)
+                x_start = np.random.randint(0, 8)
+                y_start = np.random.randint(0, 8)
+                x_end = x_start + 32
+                y_end = y_start + 32
+                
+                images[batch_ind] = img_pad[x_start:x_end, y_start:y_end]
+                label = data['labels'][data_ind].astype(int)
+                
+                images[batch_ind] = img
+                labels[batch_ind, label] = 1
+        yield (images, labels)
 
-
-optimizer = tf.train.MomentumOptimizer(learning_rate = args.lr, momentum=0.9)
 
 # will that continuously pull new batchs or do I need to feed_dict()
 # define the initial channels of input
 inputs = tf.placeholder(tf.float32, shape=[None, None, None, 3])
-pred = resnet(inputs, args.num_classes, training=True, init_kernel_size=3,
+is_training = tf.placeholder(tf.bool)
+pred = resnet(inputs, args.num_classes, is_training, init_kernel_size=3,
                block_sizes=[3]*3, init_num_filters=16, init_conv_stride=1,
                init_pool_size=0, bottleneck=False)
+
+learning_rate = tf.placeholder(tf.float32)
+optimizer = tf.train.MomentumOptimizer(learning_rate = learning_rate, momentum=0.9)
 
 act = tf.placeholder(tf.float32)
 cross_entropy = tf.losses.softmax_cross_entropy(act, pred)
 l2_loss = 0.0001 * tf.add_n([tf.nn.l2_loss(tf.cast(v, tf.float32)) for v in tf.trainable_variables()
-                             ])
+                             if 'batch_norm' not in v.name])
 loss = l2_loss + cross_entropy
-train = optimizer.minimize(loss)
+# for batch_norm
+update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
+with tf.control_dependencies(update_ops):
+    train = optimizer.minimize(loss)
+
 saver = tf.train.Saver()
 sess = tf.Session()
 
@@ -94,6 +107,7 @@ else:
     init_vars = tf.global_variables_initializer()
     sess.run(init_vars)
 
+global_step = 0
 for epoch in range(1, args.num_epochs):        
     print('Starting Epoch {}'.format(epoch))
     num_samples, num_correct = 0, 0
@@ -103,20 +117,26 @@ for epoch in range(1, args.num_epochs):
         imgs, labels = batch
         # at what point are gradients reset? does loss run through the network again?
         # does having multiple arguments to sess.run affect speed or does it do this efficiently?
-        _, loss_value, predict = sess.run((train, loss, pred), feed_dict={inputs:imgs, act:labels})
+        _, loss_value, predict = sess.run((train, loss, pred),
+                                          feed_dict={inputs:imgs, is_training:True,
+                                                     act:labels, learning_rate:args.lr})
         num_correct += (predict.argmax(axis=1) == labels.argmax(axis=1)).sum()
         num_samples += predict.shape[0]
         avg_loss = (avg_loss * i + loss_value)  / (i + 1)
+        global_step += 1
+        if global_step == 32000 or global_step == 48000:
+            args.lr /= 10
+            print(f'NEW LEARNING RATE: {args.lr}')
     epoch_end = time.time()
     print('Epoch {}, Loss {}, Accuracy {}, Time {}'.format(epoch, avg_loss, num_correct / num_samples, epoch_end - epoch_start))
-
+    
     # save Variables and run validation
     if epoch % 1 == 0:
         save_path = saver.save(sess, 'checkpoints/resnet/epoch_{}.ckpt'.format(epoch))
         num_samples, num_correct = 0, 0
         for batch in get_batch(args.data_dir, args.batch_size, train=False):
             imgs, labels = batch
-            predict = sess.run(pred, feed_dict={inputs:imgs, act:labels})
+            predict = sess.run(pred, feed_dict={inputs:imgs, is_training:False, act:labels})
             num_correct += (predict.argmax(axis=1) == labels.argmax(axis=1)).sum()
             num_samples += predict.shape[0]
         print("Validation Accuracy {}".format(num_correct / num_samples))
