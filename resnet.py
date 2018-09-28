@@ -5,7 +5,7 @@ from __future__ import print_function
 import tensorflow as tf
 
 _BATCH_NORM_DECAY = 0.9
-_BATCH_NORM_EPSILON = 1e-3
+_BATCH_NORM_EPSILON = 1e-5
 DEFAULT_DTYPE = tf.float32
 CASTABLE_TYPES = (tf.float16,)
 ALLOWED_TYPES = (DEFAULT_DTYPE,) + CASTABLE_TYPES
@@ -16,7 +16,7 @@ def batch_norm(inputs, training, data_format):
     return tf.layers.batch_normalization(
         inputs = inputs, axis = 1 if data_format == 'channels_first' else 3,
         momentum = _BATCH_NORM_DECAY, epsilon = _BATCH_NORM_EPSILON,
-        training = training)
+        training = training, fused=True)
 
 def fixed_padding(inputs, kernel_size, data_format):
     """Pads the input along the spatial dimensions independently of input size."""
@@ -42,7 +42,7 @@ def conv2d_fixed_padding(inputs, filters, kernel_size, strides, data_format):
     return tf.layers.conv2d(
         inputs=inputs, filters=filters, kernel_size=kernel_size, strides=strides,
         padding=('SAME' if strides == 1 else 'VALID'), use_bias=False,
-        kernel_initializer=tf.variance_scaling_initializer(scale=2.0),
+        kernel_initializer=tf.variance_scaling_initializer(),
         data_format=data_format)
 
 def _regular_block_v1(inputs, filters, training, projection_shortcut,
@@ -53,17 +53,17 @@ def _regular_block_v1(inputs, filters, training, projection_shortcut,
         shortcut = batch_norm(inputs=shortcut, training=training,
                               data_format=data_format)
         
-    inputs = conv2d_fixed_padding(inputs=inputs, filters=filters, kernel_size=3,
+    outs = conv2d_fixed_padding(inputs=inputs, filters=filters, kernel_size=3,
                                   strides=strides, data_format=data_format)
-    inputs = batch_norm(inputs, training, data_format)
-    inputs = tf.nn.relu(inputs)
+    outs = batch_norm(outs, training, data_format)
+    outs = tf.nn.relu(outs)
 
-    inputs = conv2d_fixed_padding(inputs=inputs, filters=filters, kernel_size=3,
+    outs = conv2d_fixed_padding(inputs=outs, filters=filters, kernel_size=3,
                                   strides=1, data_format=data_format)
-    inputs = batch_norm(inputs, training, data_format)
-    inputs += shortcut
-    inputs = tf.nn.relu(inputs)
-    return inputs
+    outs = batch_norm(outs, training, data_format)
+    outs += shortcut
+    outs = tf.nn.relu(outs)
+    return outs
 
 def _bottleneck_block_v1(inputs, filters, training, projection_shortcut,
                          strides, data_format):
@@ -100,19 +100,20 @@ def _bottleneck_block_v1(inputs, filters, training, projection_shortcut,
     return inputs
 
 def block_layer(inputs, filters, num_blocks, strides, training, bottleneck, name, data_format):
+
     if bottleneck:
         block = _bottleneck_block_v1
         out_filters = filters * 4
     else:
         block = _regular_block_v1
         out_filters = filters
-    projection_shortcut = None
     
-    if strides != 1:
-        def projection_shortcut(inputs):
-            return conv2d_fixed_padding(
-                inputs=inputs, filters=out_filters, kernel_size=1, strides=strides,
-                data_format=data_format)
+    def projection_shortcut(inputs):
+        return conv2d_fixed_padding(
+            inputs=inputs, filters=out_filters, kernel_size=1, strides=strides,
+            data_format=data_format)
+        return padded_inputs
+
 
 
     inputs = block(inputs, filters, training, projection_shortcut, strides,
@@ -143,6 +144,7 @@ def resnet(batch, num_classes, training, init_kernel_size=7, block_sizes=[3, 4, 
     inputs = batch_norm(inputs, training, data_format)
     inputs = tf.nn.relu(inputs)
 
+    # why is padding='SAME'?
     if init_pool_size:
         inputs = tf.layers.max_pooling2d(inputs=inputs, pool_size=init_pool_size,
                                              strides=init_pool_stride, padding='SAME',

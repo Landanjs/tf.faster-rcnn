@@ -57,22 +57,22 @@ def get_batch(data_dir, batch_size, train):
         batch = indices[start:end]
         with h5py.File(os.path.join(data_dir, 'train_cifar10.hdf5'), 'r') as data:
             images = np.zeros((batch_size, 32, 32, 3))
-            labels = np.zeros((batch_size, args.num_classes))
+            labels = np.zeros(batch_size)
             for batch_ind, data_ind in enumerate(batch):
-                img = (data['images'][data_ind] - img_mean)
-                if np.random.random_sample() < 0.5:
-                    img = np.fliplr(img)
-                img_pad = np.pad(img, ((4, 4), (4, 4), (0, 0)), 'constant', constant_values=0)
-                x_start = np.random.randint(0, 8)
-                y_start = np.random.randint(0, 8)
-                x_end = x_start + 32
-                y_end = y_start + 32
-                
-                images[batch_ind] = img_pad[x_start:x_end, y_start:y_end]
-                label = data['labels'][data_ind].astype(int)
-                
-                images[batch_ind] = img
-                labels[batch_ind, label] = 1
+                img = data['images'][data_ind] 
+
+                if train:
+                    img_pad = np.pad(img, ((4, 4), (4, 4), (0, 0)), 'constant', constant_values=0)
+                    x_start = np.random.randint(0, 8)
+                    y_start = np.random.randint(0, 8)
+                    x_end = x_start + 32
+                    y_end = y_start + 32
+                    img = img_pad[x_start:x_end, y_start:y_end]
+                    if np.random.random_sample() < 0.5:
+                        img = np.fliplr(img)
+
+                images[batch_ind] = (img - img_mean) 
+                labels[batch_ind] = data['labels'][data_ind].astype(int)                
         yield (images, labels)
 
 
@@ -81,21 +81,23 @@ def get_batch(data_dir, batch_size, train):
 inputs = tf.placeholder(tf.float32, shape=[None, None, None, 3])
 is_training = tf.placeholder(tf.bool)
 pred = resnet(inputs, args.num_classes, is_training, init_kernel_size=3,
-               block_sizes=[3]*3, init_num_filters=16, init_conv_stride=1,
+               block_sizes=[5]*3, init_num_filters=16, init_conv_stride=1,
                init_pool_size=0, bottleneck=False)
+pred = tf.cast(pred, tf.float32)
 
 learning_rate = tf.placeholder(tf.float32)
+# work better with nesterov?
 optimizer = tf.train.MomentumOptimizer(learning_rate = learning_rate, momentum=0.9)
 
-act = tf.placeholder(tf.float32)
-cross_entropy = tf.losses.softmax_cross_entropy(act, pred)
-l2_loss = 0.0001 * tf.add_n([tf.nn.l2_loss(tf.cast(v, tf.float32)) for v in tf.trainable_variables()
-                             if 'batch_norm' not in v.name])
+act = tf.placeholder(tf.int32)
+cross_entropy = tf.losses.sparse_softmax_cross_entropy(act, pred)
+l2_loss = 2e-4 * tf.add_n([tf.nn.l2_loss(tf.cast(v, tf.float32)) for v in tf.trainable_variables()])
 loss = l2_loss + cross_entropy
 # for batch_norm
-update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
-with tf.control_dependencies(update_ops):
-    train = optimizer.minimize(loss)
+# group or dependency (from BN example)?
+minimize_op = optimizer.minimize(loss)
+update_op = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
+train = tf.group(minimize_op, update_op)
 
 saver = tf.train.Saver()
 sess = tf.Session()
@@ -120,7 +122,7 @@ for epoch in range(1, args.num_epochs):
         _, loss_value, predict = sess.run((train, loss, pred),
                                           feed_dict={inputs:imgs, is_training:True,
                                                      act:labels, learning_rate:args.lr})
-        num_correct += (predict.argmax(axis=1) == labels.argmax(axis=1)).sum()
+        num_correct += (predict.argmax(axis=1) == labels).sum()
         num_samples += predict.shape[0]
         avg_loss = (avg_loss * i + loss_value)  / (i + 1)
         global_step += 1
@@ -131,13 +133,13 @@ for epoch in range(1, args.num_epochs):
     print('Epoch {}, Loss {}, Accuracy {}, Time {}'.format(epoch, avg_loss, num_correct / num_samples, epoch_end - epoch_start))
     
     # save Variables and run validation
-    if epoch % 1 == 0:
+    if epoch % 10 == 0:
         save_path = saver.save(sess, 'checkpoints/resnet/epoch_{}.ckpt'.format(epoch))
         num_samples, num_correct = 0, 0
         for batch in get_batch(args.data_dir, args.batch_size, train=False):
             imgs, labels = batch
             predict = sess.run(pred, feed_dict={inputs:imgs, is_training:False, act:labels})
-            num_correct += (predict.argmax(axis=1) == labels.argmax(axis=1)).sum()
+            num_correct += (predict.argmax(axis=1) == labels).sum()
             num_samples += predict.shape[0]
         print("Validation Accuracy {}".format(num_correct / num_samples))
     
