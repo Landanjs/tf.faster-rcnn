@@ -52,27 +52,31 @@ def get_batch(data_dir, batch_size, train):
         
     num_batches = (set_size // batch_size) + 1
     
-    for start in range(0, set_size, batch_size):
-        end = start + batch_size
-        batch = indices[start:end]
+    for batch_start in range(0, set_size, batch_size):
+        batch_end = batch_start + batch_size
+        # sort and convert to list for slicing hdf5 file
+        batch_ind = list(np.sort(indices[batch_start:batch_end]))
         with h5py.File(os.path.join(data_dir, 'train_cifar10.hdf5'), 'r') as data:
-            images = np.zeros((batch_size, 32, 32, 3))
-            labels = np.zeros(batch_size)
-            for batch_ind, data_ind in enumerate(batch):
-                img = data['images'][data_ind] 
+            # Load data
+            imgs = data['images'][batch_ind]
+            labels = data['labels'][batch_ind]
+
+            # Pad images for preprocessing
+            imgs_pad = np.pad(imgs, ((0, 0), (4, 4), (4, 4), (0, 0)), 'constant', constant_values=0)
+
+            # allocate array to store cropped images
+            images = np.zeros((len(labels), 32, 32, 3))
+            for i in range(len(labels)):
 
                 if train:
-                    img_pad = np.pad(img, ((4, 4), (4, 4), (0, 0)), 'constant', constant_values=0)
-                    x_start = np.random.randint(0, 8)
-                    y_start = np.random.randint(0, 8)
-                    x_end = x_start + 32
-                    y_end = y_start + 32
-                    img = img_pad[x_start:x_end, y_start:y_end]
+                    start = np.random.randint(0, 8, size = 2)
+                    end = start + 32
+                    images[i] = imgs_pad[i, start[0]:end[0], start[1]:end[1]]
                     if np.random.random_sample() < 0.5:
-                        img = np.fliplr(img)
+                        images[i] = np.fliplr(images[i])
 
-                images[batch_ind] = (img - img_mean) 
-                labels[batch_ind] = data['labels'][data_ind].astype(int)                
+            images -= img_mean
+
         yield (images, labels)
 
 
@@ -115,7 +119,9 @@ for epoch in range(1, args.num_epochs):
     num_samples, num_correct = 0, 0
     avg_loss = 0
     epoch_start = time.time()
+    batch_start = 0
     for i, batch in enumerate(get_batch(args.data_dir, args.batch_size, train=True)):
+
         imgs, labels = batch
         # at what point are gradients reset? does loss run through the network again?
         # does having multiple arguments to sess.run affect speed or does it do this efficiently?
@@ -131,7 +137,6 @@ for epoch in range(1, args.num_epochs):
             print(f'NEW LEARNING RATE: {args.lr}')
     epoch_end = time.time()
     print('Epoch {}, Loss {}, Accuracy {}, Time {}'.format(epoch, avg_loss, num_correct / num_samples, epoch_end - epoch_start))
-    
     # save Variables and run validation
     if epoch % 10 == 0:
         save_path = saver.save(sess, 'checkpoints/resnet/epoch_{}.ckpt'.format(epoch))
